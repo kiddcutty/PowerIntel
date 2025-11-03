@@ -1,23 +1,94 @@
-#Open dialog box for user to select enterprise-attack.json file location
-[System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms") | Out-Null
-$OpenFileDialog = New-Object System.Windows.Forms.OpenFileDialog
-$OpenFileDialog.InitialDirectory = Get-Location  # Sets to current directory, or you can specify a path
-$OpenFileDialog.filter = "All files (*.*) | *.*"
-$OpenFileDialog.Title = "Select enterprise-attack.json file"
-$dialogResult = $OpenFileDialog.ShowDialog()
+param(
+    [string]$JsonPath,
+    [string]$CsvPath
+)
 
-if ($dialogResult -eq "OK") {
-    $jsonPath = $OpenFileDialog.FileName
-    Write-Host "Selected file: $jsonPath" -ForegroundColor Green
-    $file = Get-Content -Path $jsonPath
-} else {
-    Write-Host "No file selected. Exiting script." -ForegroundColor Red
-    exit
+# Helper: determine if running on Windows
+$IsWindowsPlatform = $false
+try {
+    if (Get-Variable -Name IsWindows -Scope 0 -ErrorAction SilentlyContinue) {
+        $IsWindowsPlatform = $IsWindows
+    } else {
+        $IsWindowsPlatform = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+    }
+} catch {
+    try {
+        $plat = [System.Environment]::OSVersion.Platform
+        $IsWindowsPlatform = ($plat -eq [System.PlatformID]::Win32NT)
+    } catch {
+        $IsWindowsPlatform = $false
+    }
 }
-#$file = get-content .\enterprise-attack.json  
+
+function Get-FilePathFromConsole {
+    param(
+        [string]$Prompt
+    )
+    while ($true) {
+        $p = Read-Host $Prompt
+        if ([string]::IsNullOrWhiteSpace($p)) {
+            Write-Host "No path entered. Exiting script." -ForegroundColor Red
+            exit 1
+        }
+        if (Test-Path $p) { return (Resolve-Path $p).Path }
+        Write-Host "File not found at '$p'. Try again or Ctrl+C to cancel." -ForegroundColor Yellow
+    }
+}
+
+function Show-OpenFileDialog {
+    param(
+        [string]$InitialDir = (Get-Location).Path,
+        [string]$Filter = "All files (*.*)|*.*",
+        [string]$Title = "Select a file"
+    )
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.InitialDirectory = $InitialDir
+        $ofd.Filter = $Filter
+        $ofd.Title = $Title
+        $ofd.Multiselect = $false
+
+        $result = $ofd.ShowDialog()
+        if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+            return $ofd.FileName
+        } else {
+            return $null
+        }
+    } catch {
+        # GUI unavailable (headless or assembly missing)
+        return $null
+    }
+}
+
+# ---------------------------
+# 1) Choose enterprise-attack.json
+# ---------------------------
+if ($JsonPath) {
+    if (-not (Test-Path $JsonPath)) {
+        Write-Host "Provided JsonPath '$JsonPath' does not exist. Exiting." -ForegroundColor Red
+        exit 1
+    }
+    $jsonPath = (Resolve-Path $JsonPath).Path
+} else {
+    if ($IsWindowsPlatform) {
+        $jsonPath = Show-OpenFileDialog -Filter "JSON files (*.json)|*.json|All files (*.*)|*.*" -Title "Select enterprise-attack.json file"
+        if (-not $jsonPath) {
+            Write-Host "Windows file dialog not used or cancelled. Falling back to console input..."
+            $jsonPath = Get-FilePathFromConsole -Prompt "Enter the full path to enterprise-attack.json"
+        }
+    } else {
+        $jsonPath = Get-FilePathFromConsole -Prompt "Enter the full path to enterprise-attack.json"
+    }
+}
+
+Write-Host "Selected file: $jsonPath" -ForegroundColor Green
+$file = Get-Content -Path $jsonPath
 
 #Turn it from JSON into a standard powershell array
-$obj1 = $file | convertfrom-json
+$obj1 = $file | ConvertFrom-Json
 
 #It stuffs everything under a bundle - this next bit pulls out the ojects into a standard collection.
 $obj2 = $obj1.objects
@@ -26,30 +97,32 @@ $obj2 = $obj1.objects
 $results = New-Object System.Collections.Generic.List[System.Object]
 $results2 = New-Object System.Collections.Generic.List[System.Object]
 
-#Open dialog box for user to select techniques.csv file location
-[System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms") | Out-Null
-$OpenFileDialog = New-Object System.Windows.Forms.OpenFileDialog
-$OpenFileDialog.InitialDirectory = Get-Location  # Sets to current directory, or you can specify a path
-$OpenFileDialog.filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
-$OpenFileDialog.Title = "Select techniques.csv file"
-$dialogResult = $OpenFileDialog.ShowDialog()
-
-if ($dialogResult -eq "OK") {
-    $csvPath = $OpenFileDialog.FileName
-    Write-Host "Selected file: $csvPath" -ForegroundColor Green
-    $list = import-csv -Path $csvPath
+# ---------------------------
+# 2) Choose techniques.csv
+# ---------------------------
+if ($CsvPath) {
+    if (-not (Test-Path $CsvPath)) {
+        Write-Host "Provided CsvPath '$CsvPath' does not exist. Exiting." -ForegroundColor Red
+        exit 1
+    }
+    $csvPath = (Resolve-Path $CsvPath).Path
 } else {
-    Write-Host "No file selected. Exiting script." -ForegroundColor Red
-    exit
+    if ($IsWindowsPlatform) {
+        $csvPath = Show-OpenFileDialog -Filter "CSV files (*.csv)|*.csv|All files (*.*)|*.*" -Title "Select techniques.csv file"
+        if (-not $csvPath) {
+            Write-Host "Windows file dialog not used or cancelled. Falling back to console input..."
+            $csvPath = Get-FilePathFromConsole -Prompt "Enter the full path to techniques.csv"
+        }
+    } else {
+        $csvPath = Get-FilePathFromConsole -Prompt "Enter the full path to techniques.csv"
+    }
 }
-#$list = import-csv -Path "./techniques.csv"
+
+Write-Host "Selected file: $csvPath" -ForegroundColor Green
+$list = Import-Csv -Path $csvPath
 
 ### Function for creating the MITRE Attack Navigator Layer from 
 ### list of Technique IDs and Tactics ($techInfo) then outputing JSON file 
-## Build MITRE Attack Navigator Layer Template ##
-## Gradient is set for Green (low score) to Red (high score). 
-## The legend is built to reflect Least to Most Likely 
-## Set gradient max value to number of APTs 
 function New-NavLayer {
     param(
         [Parameter(Mandatory)]
@@ -62,41 +135,16 @@ function New-NavLayer {
 
     $jsonLayer = [ordered]@{
         name                          = "$aptGroupName"
-        versions                      = @{
-            attack    = "17"
-            navigator = "5.1.0"
-            layer     = "4.5"
-        }
+        versions                      = @{}
         domain                        = "enterprise-attack"
         description                   = ""
-        filters                       = @{
-            platforms = @("Linux", "macOS", "Windows", "PRE", "Containers", "Network", "Office 365", "SaaS", "Google Workspace", "IaaS", "Azure AD")
-        }
+        filters                       = @{}
         sorting                       = "0"
-        layout                        = @{
-            layout               = "side"
-            aggregateFunction    = "max"
-            showID               = "true"
-            showName             = "true"
-            showAggregatedScores = "true"
-            countUnscored        = "false"
-        }
+        layout                        = @{}
         hideDisabled                  = "true"
         techniques                    = @()
-        gradient                      = @{
-            colors   = @("#8ec843ff", "#ffe766ff", "#ff6666ff")
-            minValue = 0
-            maxValue = $aptNumber
-        }
-        legendItems                   = @(
-            @{
-                label = "Least Likely"
-                color = "#8ec843ff"
-            },
-            @{
-                label = "Most Likely"
-                color = "#ff6666ff"
-            })
+        gradient                      = @{}
+        legendItems                   = @()
         metadata                      = ""
         links                         = ""
         showTacticRowBackground       = "false"
@@ -106,8 +154,38 @@ function New-NavLayer {
         selectVisibleTechniques       = "false"
     }
 
-    ## Build each Technique in Attack Navigator JSON based on TechID and Tactic ##
-    ## For techniques with multiple tactics a technique will be built for each tactic ##
+    $jsonLayer.versions = @{
+        attack    = "17"
+        navigator = "5.1.0"
+        layer     = "4.5"
+    }
+    $jsonLayer.filters = @{
+        platforms = @("Linux", "macOS", "Windows", "PRE", "Containers", "Network", "Office 365", "SaaS", "Google Workspace", "IaaS", "Azure AD")
+    }
+    $jsonLayer.layout = @{
+        layout               = "side"
+        aggregateFunction    = "max"
+        showID               = "true"
+        showName             = "true"
+        showAggregatedScores = "true"
+        countUnscored        = "false"
+    }
+    $jsonLayer.gradient = @{
+        colors   = @("#8ec843ff", "#ffe766ff", "#ff6666ff")
+        minValue = 0
+        maxValue = $aptNumber
+    }
+    $jsonLayer.legendItems = @(
+        @{
+            label = "Least Likely"
+            color = "#8ec843ff"
+        },
+        @{
+            label = "Most Likely"
+            color = "#ff6666ff"
+        }
+    )
+
     foreach ($tactic in $aptTable[$aptGroupName].Keys) {
         foreach ($techID in $aptTable[$aptGroupName][$tactic]) {
             $newTechnique = [ordered]@{
@@ -125,40 +203,25 @@ function New-NavLayer {
         }
     }
 
-    ## Convert to JSON and output file for MITRE Attack Navigator ##
     $jsonLayer = $jsonLayer | ConvertTo-Json -Depth 5
     $jsonLayer | Out-File ".\$aptGroupName.json"
 }
 
 #this whole thing gets wrapped in a foreach loop
 ##BEGIN MASTER LOOP
-#attack_list contains every stanza that identifies an attack pattern.  
-$attack_list = $obj2 | where-object type -eq "attack-pattern"
-#rel_list stores all the relationship stanzas where an intrusion set is listed as using something like an attack pattern or tool
+$attack_list = $obj2 | Where-Object type -eq "attack-pattern"
 $rel_list = $obj2 | Where-Object { $_.type -eq "relationship" -and $_.relationship_type -eq "uses" -and $_.source_ref -like "intrusion*" }
-#intrusion_list is literally every stanza with a type of "intrusion_set".  Too broad, but oh well 
 $intrusion_list = $obj2 | Where-Object { $_.type -eq "intrusion-set" }
 
-#This foreach is taking the lines from the CSV and pulling in the technique names for evaluation
 foreach ($techid in $list) {
-    #i made this variable to avoid typing $techid.TechniqueID over and over again
     $tech = $techid.TechniqueID
-    
+
     Write-Host "==============================================================" -ForegroundColor Yellow
     Write-Host "$tech is associated with attack patterns:" -ForegroundColor Yellow
-    
-
-
-    #this foreach is pulling technique ids out of all the attack-pattern stanzas in the attack_list
-    #it then checks to see if one of them matches the current technique id we're looking at for the iteration
-    #if it does, we set the "pattern" variable equal to the attach-pattern id
-    #-------techique ids are similar to "T1609" while attack pattern ids look more like "attack-pattern--6ee2dc99-91ad-4534-a7d8-a649358c331f"
-    #we write out the matched attack pattern id to the screen (should be one per tech id)
 
     ForEach ($attack in $attack_list) {
 
         $attackid = ($attack.external_references).external_id
-
 
         if ($attackid -eq $tech) {
             $pattern = $attack.id
@@ -166,29 +229,20 @@ foreach ($techid in $list) {
             "`n"
             Write-Host ". . . which is associated with this intrusion set . . ." -ForegroundColor DarkYellow
 
-            #here we're taking the attack-pattern id and finding all the intrusion sets that include it.  Then we store that list in the test_pattern variable    
             $test_pattern = $rel_list | Where-Object { $_.target_ref -eq $pattern -and $_.source_ref -like "intrusion*" }
             $test_pattern.source_ref
             "`n"
 
-            #this chunk here is going to try to match the intrusion set ids to the generic group names for APTs
             Write-Host "aliased to:" -ForegroundColor DarkYellow
             foreach ($pattern in $test_pattern) {
                 $group = $intrusion_list | Where-Object { $_.id -eq $pattern.source_ref }
-                #we end up with a set of objects, but we really only want one property - the name.
                 $group.name
-                #now we take that list list of names and append it to the list we created at the top.
                 $results.Add($group.name)
-                
             }
         }
     }
-    "`n" 
-} #end master
-
-#now we're just listing out all the APTs we found to use our techniques.  we group them up and count how many times they were implicated.  
-#sort that list and pull out the top three
-
+    "`n"
+}
 
 $aptNum = Read-Host "Enter number of groups"
 "`n"
@@ -196,23 +250,21 @@ $aptNum = Read-Host "Enter number of groups"
 "`n"
 Write-Host "--------------------------------------------------------" -ForegroundColor DarkYellow
 Write-Host "Total Final List (duplicative) of All Groups Implicated" -ForegroundColor DarkYellow
-Write-Host "--------------------------------------------------------" -ForegroundColor DarkYellow 
+Write-Host "--------------------------------------------------------" -ForegroundColor DarkYellow
 
-$results | Group-Object -NoElement | Sort-Object -Property count -Descending | Select-Object -first $aptNum
+$results | Group-Object -NoElement | Sort-Object -Property count -Descending | Select-Object -First $aptNum
 Start-Sleep -Seconds 3
 "`n"
-write-host "compiling list for selected groups . . ." -ForegroundColor DarkYellow
-$apt_list = $results | Group-Object -NoElement | Sort-Object -Property count -Descending | Select-Object -first $aptNum
+Write-Host "compiling list for selected groups . . ." -ForegroundColor DarkYellow
+$apt_list = $results | Group-Object -NoElement | Sort-Object -Property count -Descending | Select-Object -First $aptNum
 Write-Host "===============" -ForegroundColor DarkYellow
 $apt_list.name
 Write-Host "===============" -ForegroundColor DarkYellow
 Start-Sleep -Seconds 5
 "`n"
 foreach ($apt in $apt_list) {
-    $entry = $entry = $intrusion_list | Where-Object { $_.name -eq $apt.name } | Select-Object id
-    
-    $results2.add($entry)
-    
+    $entry = $intrusion_list | Where-Object { $_.name -eq $apt.name } | Select-Object -First 1 -Property id
+    $results2.Add($entry)
 }
 
 $aptTable = @{}
@@ -220,21 +272,16 @@ $aptTable = @{}
 $len = $results2.Count
 $i = 0
 while ($i -lt $len) {
-    $aptGroup = $apt_list[$i].name 
+    $aptGroup = $apt_list[$i].name
     Write-Host "===============" -ForegroundColor DarkYellow
     $aptGroup
-    Write-Host "===============" -ForegroundColor DarkYellow  
-    Write-Host "corresponds to intrusion_set: " -ForegroundColor DarkYellow $results2[$i] 
+    Write-Host "===============" -ForegroundColor DarkYellow
+    Write-Host "corresponds to intrusion_set: " -ForegroundColor DarkYellow $results2[$i]
     Write-Host "containing the following techniques . . ." -ForegroundColor DarkYellow
     $out = $rel_list | Where-Object { $_.source_ref -eq $results2[$i].id -and $_.target_ref -like "attack*" } | Select-Object target_ref
-    $targetList = $out.target_ref 
+    $targetList = $out.target_ref
     Write-Output $targetList
     "`n"
-    # Write-Output "Iteration: $i"
-    # Write-Output "APT Group: $aptGroup"
-    # Write-Output "Intrusion Set ID: $($results2[$i])"
-
-    #Build hashtable with structure [APTNAME][TACTICS][TECHID]
 
     foreach ($item in $targetList) {
         $matchedAttacks = $attack_list | Where-Object { $_.id -eq $item }
@@ -264,26 +311,21 @@ while ($i -lt $len) {
     Write-Host "===============================================" -ForegroundColor DarkYellow
     Start-Sleep -Seconds 3
     "`r"
-    New-NavLayer -aptGroupName $aptGroup -aptNumber $aptNum -aptTable $aptTable 
+    New-NavLayer -aptGroupName $aptGroup -aptNumber $aptNum -aptTable $aptTable
     $i++
     "`n"
 }
 
-    Write-Host "=== APT Groups with Tactics and Techniques ===" -ForegroundColor Green 
+Write-Host "=== APT Groups with Tactics and Techniques ===" -ForegroundColor Green
 
-    foreach ($aptGroup in $aptTable.Keys) {
-        Write-Host "`nAPT Group: $aptGroup" -ForegroundColor DarkYellow
-        Write-Host "==========================================================" -ForegroundColor DarkYellow
+foreach ($aptGroup in $aptTable.Keys) {
+    Write-Host "`nAPT Group: $aptGroup" -ForegroundColor DarkYellow
+    Write-Host "==========================================================" -ForegroundColor DarkYellow
 
-        foreach ($tactic in $aptTable[$aptGroup].Keys) {
-            Write-Host " Tactic: $tactic" -ForegroundColor Magenta
-            foreach ($techID in $aptTable[$aptGroup][$tactic]) {
-                Write-Host "   - $techID" -ForegroundColor White
-            }
+    foreach ($tactic in $aptTable[$aptGroup].Keys) {
+        Write-Host " Tactic: $tactic" -ForegroundColor Magenta
+        foreach ($techID in $aptTable[$aptGroup][$tactic]) {
+            Write-Host "   - $techID" -ForegroundColor White
         }
     }
-
-
-
-
-
+}
